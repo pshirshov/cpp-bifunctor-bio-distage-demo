@@ -265,6 +265,12 @@ class Bio {
 public:
     explicit Bio(Dictionary dictionary) : dictionary_(std::move(dictionary)) {}
 
+    template<class Factory, class... Args>
+    auto do_(Factory factory, Args... args) const
+        requires requires { dictionary_.do_(dictionary_, std::move(factory), std::move(args)...); } {
+        return dictionary_.do_(dictionary_, std::move(factory), std::move(args)...);
+    }
+
     template<class A>
     auto pure(A value) const requires requires { dictionary_.template pure<Never>(std::move(value)); } {
         return dictionary_.template pure<Never>(std::move(value));

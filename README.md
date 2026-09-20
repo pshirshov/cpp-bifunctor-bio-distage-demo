@@ -49,6 +49,7 @@ On Linux, also check the trampoline under a small native stack:
 
 ```sh
 bash -c 'ulimit -c 0; ulimit -s 512; ./build/debug/stack_safety'
+bash -c 'ulimit -c 0; ulimit -s 512; ./build/debug/do_stack_safety'
 ```
 
 ## IO and typeclasses
@@ -137,7 +138,8 @@ a copy, and derived operations retain that dictionary rather than reselecting
 an instance from the effect's type. Dictionaries and captures must be copyable.
 `Bio{Monad2<Eff>{}}` provides `pure`, `map`, `flat_map`, and `traverse` but no
 `fail`. `Error2` adds error operations; `Sync2<IO>` adds `sync`, `suspend`, and
-`attempt`; `Bracket2<IO>` adds `bracket`. A stronger dictionary is selected
+`attempt`; `Bracket2<IO>` adds `bracket`; `Do2` adds coroutine sequencing
+for IO and expected. A stronger dictionary is selected
 explicitly, not discovered from arbitrary variables in scope. There is no
 mutable ambient accessor. Name the effect family `Eff` to leave `F` available
 as a value name.
@@ -155,11 +157,11 @@ Provide a local override once and pass the context through the program:
 
 ```cpp
 auto scope = implicit_scope<IO>().provide<Monad2>(TracingMonad{trace});
-auto program = with_bio(scope, [](auto F) {
-    return F.flat_map(F.pure(41), [F](auto value) {
-        return F.pure(value + 1);
-    });
-});
+const auto F = bio(scope);
+auto program = F.do_([](auto F) -> Do<IO, Never, int> {
+    auto value = co_await F.pure(41);
+    co_return value + 1;
+}, F);
 ```
 
 The [runnable example](examples/implicit_scope.cpp) returns an IO from a scope
@@ -223,20 +225,79 @@ an expiring `this` remain the provider author's responsibility. A scope is an
 ordinary typed value that can also be injected through DI; no global registry,
 thread-local state, or caller-local variable search is involved.
 
+### Coroutine do-notation
+
+[do.hpp](include/mini/do.hpp) supplies `Do<Eff,E,A>` and the `Do2` capability.
+`F.do_(factory, arguments...)` returns an ordinary `Effect<Eff,E,A>`, with all
+three types inferred from the factory's coroutine return type. Include
+`mini/implicit.hpp` for the resolving accessor, or `mini/do.hpp` for an explicit
+`Bio{Do2<Eff>{}}`. `Monad2` alone does not expose `do_`.
+
 The application's sequencing is now:
 
 ```cpp
 auto run(UserId id) const {
     const auto F = bio(implicit_scope<Eff>());
-    return F.flat_map(users_->find(id), [F, greetings = greetings_](auto user) {
-        return F.traverse(*greetings, [user](const auto& greeting) {
-            return greeting->greet(user);
-        });
-    });
+    return F.do_([](auto users, auto greetings, UserId id)
+        -> Do<Eff, LookupError, Lines>
+    {
+        auto user = co_await users->find(id);
+        Lines lines;
+        for (const auto& greeting : *greetings) {
+            lines.push_back(co_await greeting->greet(user));
+        }
+        co_return lines;
+    }, users_, greetings_, id);
 }
 ```
 
-`traverse` collects results in iteration order, handles empty input, and stops
+Here `Lines` is `std::vector<std::string>`. `co_await` extracts the success
+value or stops the block on failure; `co_return` supplies its final success
+value. Ordinary loops, branches, structured bindings, and RAII locals work
+inside the block. Awaited effects must have the same effect family and either
+the declared error type or `Never`. Unrelated error types need `map_error`;
+there is no inferred error union. Use `Unit`, not `void`, for empty values,
+and `co_return co_await F.fail(error)` for a failure-only return.
+
+For IO, the wrapper snapshots its copyable factory and arguments without
+executing the body. Each execution creates a new frame, including a fresh
+local accumulator. Each await hands control back to the existing trampoline;
+there is no nested `unsafe_run`. Expected instead drives the coroutine eagerly
+in a loop. Sequential awaits are stack-safe for both; recursive IO programs
+are stack-safe when expressed through awaited, lazy `F.do_` calls. Ordinary
+recursive calls in the eager expected interpreter still use the native stack.
+
+The frame is destroyed on success, typed failure, or a defect, including
+locals that span awaits. Typed failures are not exceptions and cannot be
+intercepted by a coroutine's C++ `catch` block. Awaited IO defects also stop
+the block without resuming it. Unhandled body exceptions become IO defects;
+the expected interpreter rethrows them. Existing `catch_all`, `ensuring`,
+and `bracket` compose with the resulting effects.
+
+The wrapper owns the factory at a stable address until the frame is destroyed,
+so owning lambda captures are supported. The examples prefer captureless
+coroutines with value parameters. References, reference captures, and a captured
+`this` remain borrowed; neither copying a factory nor creating a coroutine
+extends their referents' lifetimes. Factories must be const-invocable and return
+a fresh `Do` frame. A `Do` handle itself is move-only and is not a replayable IO.
+
+The driver retains the supplied context: each await uses its selected monad's
+`flat_map`, and completion uses its `pure`. `Do2` itself can also be overridden
+through `scope.provide<Do2>(provider)`. Internally, canonical effect operations
+store the heterogeneous awaited value in its frame and normalize the step to
+`Effect<Eff,E,Unit>` before the scoped bind. Consequently bind instrumentation
+observes a Unit success channel, not the original awaited value type.
+
+This bridge requires single-shot sequencing: within an execution, a supplied
+monad must evaluate each awaited step and invoke its success continuation at
+most once. It does not support branching/multi-shot continuations or turn an
+arbitrary monad into a coroutine runtime. There are no asynchronous awaitables,
+fibers, cancellation, or scheduling. `Do2` is an explicit additional capability,
+not a consequence of the monad laws.
+
+The ordinary loop grows one vector per execution rather than copying its
+contents at every bind. The existing `traverse` combinator remains available:
+it collects results in iteration order, handles empty input, and stops
 invoking the step after failure. It copies range elements during construction;
 callbacks are lazy for IO and eager for `std::expected`. Each IO execution has
 its own accumulator. This minimal implementation copies the accumulated vector
@@ -401,9 +462,9 @@ discovery.
 
 ## Verification scope
 
-Verified on 2026-09-19 with GCC 15.3.0: all eleven CTest cases pass in the
+Verified on 2026-09-20 with GCC 15.3.0: all thirteen CTest cases pass in the
 Debug build and in the AddressSanitizer/UndefinedBehaviorSanitizer build.
-The Debug stress executable also passes with a 512 KiB native stack.
+Both Debug stress executables also pass with a 512 KiB native stack.
 Other compilers and platforms have not been verified.
 
 Tests exercise sample monad/bifunctor laws, lazy and repeated execution, typed
@@ -417,6 +478,11 @@ Accessor checks cover capability restrictions, supplied dictionary identity,
 bottom-channel widening, native expected interop, and rejected channel joins.
 Implicit-context checks cover precedence, ambiguity, ADL-based recursive
 derivation, independent providers, family validation, and escaped IO ownership.
+Coroutine checks cover inferred values, both interpreters, loops, repeatability,
+typed short-circuiting, defects, frame/closure ownership, local dictionaries,
+and rejected error channels, effect families, and unavailable capabilities.
+Stress cases cover 100,000 sequential awaits and 100,000 nested IO coroutine
+calls, including frame cleanup on success, typed failure, and defects.
 
 The tests use public contracts: Behavioral-Active / Blackbox-Atomic for IO and
 Blackbox-Group for DI/application composition. No external systems or generated

@@ -18,11 +18,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     using AppError = std::variant<di::ProvisionError, LookupError>;
-    auto program = plan->produce().map_error([](auto error) { return AppError(std::move(error)); })
-        .flat_map([](auto graph) {
-            return graph->get(key<App>())->run(UserId{1})
-                .map_error([](auto error) { return AppError(error); });
-        });
+    const auto F = bio(implicit_scope<IO>());
+    auto program = F.do_([](di::Plan plan) -> Do<IO, AppError, Lines> {
+        auto graph = co_await plan.produce()
+            .map_error([](auto error) { return AppError(std::move(error)); });
+        co_return co_await graph->get(key<App>())->run(UserId{1})
+            .map_error([](auto error) { return AppError(error); });
+    }, *plan);
     auto result = program.unsafe_run();
     if (!result) {
         std::cerr << "application failed\n";

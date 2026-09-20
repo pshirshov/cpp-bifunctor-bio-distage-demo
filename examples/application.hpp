@@ -13,6 +13,7 @@ enum class LookupError { missing_user };
 struct UserId { int value; };
 struct User { std::string name; };
 struct Dataset { std::string name; };
+using Lines = std::vector<std::string>;
 
 template<template<class, class> class Eff, class A>
 using Lookup = Effect<Eff, LookupError, A>;
@@ -69,11 +70,14 @@ public:
 
     auto run(UserId id) const {
         const auto F = bio(implicit_scope<Eff>());
-        return F.flat_map(users_->find(id), [F, greetings = greetings_](auto user) {
-            return F.traverse(*greetings, [user](const auto& greeting) {
-                return greeting->greet(user);
-            });
-        });
+        return F.do_([](auto users, auto greetings, UserId id) -> Do<Eff, LookupError, Lines> {
+            auto user = co_await users->find(id);
+            Lines lines;
+            for (const auto& greeting : *greetings) {
+                lines.push_back(co_await greeting->greet(user));
+            }
+            co_return lines;
+        }, users_, greetings_, id);
     }
 
 private:

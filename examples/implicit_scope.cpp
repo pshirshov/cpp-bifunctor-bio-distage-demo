@@ -17,12 +17,14 @@ private:
     std::shared_ptr<Trace> trace_;
 };
 
-auto increment_twice(auto scope, int initial) {
-    return mini::with_bio(std::move(scope), [initial](auto F) {
-        return F.flat_map(F.pure(initial), [F](auto value) {
-            return F.map(F.pure(value + 1), [](auto next) { return next + 1; });
-        });
-    });
+template<template<class, class> class Eff, class... Bindings>
+auto increment_twice(mini::ImplicitScope<Eff, Bindings...> scope, int initial) {
+    const auto F = mini::bio(std::move(scope));
+    return F.do_([](auto F, int initial) -> mini::Do<Eff, mini::Never, int> {
+        auto value = co_await F.pure(initial);
+        auto next = co_await F.pure(value + 1);
+        co_return next + 1;
+    }, F, initial);
 }
 
 int main() {

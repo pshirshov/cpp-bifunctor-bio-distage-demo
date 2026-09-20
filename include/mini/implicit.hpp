@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bio.hpp"
+#include "do.hpp"
 
 #include <array>
 #include <tuple>
@@ -35,12 +35,18 @@ auto instance(Request<Bracket2<Eff>>, const Scope&) requires requires { Bracket2
     return Bracket2<Eff>{};
 }
 
+template<template<class, class> class Eff, class Scope>
+auto instance(Request<Do2<Eff>>, const Scope&) requires requires { Do2<Eff>{}; } {
+    return Do2<Eff>{};
+}
+
 namespace detail {
 
 template<class Key> struct InstanceKey { using type = Key; };
 template<> struct InstanceKey<Monad2<std::expected>> { using type = Monad2<Result>; };
 template<> struct InstanceKey<Bifunctor2<std::expected>> { using type = Bifunctor2<Result>; };
 template<> struct InstanceKey<Error2<std::expected>> { using type = Error2<Result>; };
+template<> struct InstanceKey<Do2<std::expected>> { using type = Do2<Result>; };
 template<class Key> using InstanceKeyOf = typename InstanceKey<Key>::type;
 
 template<class Provider, class Required>
@@ -137,6 +143,15 @@ class ResolvedDictionary {
 
 public:
     explicit ResolvedDictionary(Scope scope) : scope_(std::move(scope)) {}
+
+    template<class Dictionary, class Factory, class... Args>
+    auto do_(Dictionary dictionary, Factory factory, Args... args) const
+        requires requires {
+            { scope_.template summon<Do2>().do_(std::move(dictionary), std::move(factory), std::move(args)...) }
+                -> EffectInScope<Scope>;
+        } {
+        return scope_.template summon<Do2>().do_(std::move(dictionary), std::move(factory), std::move(args)...);
+    }
 
     template<class E, class A>
     auto pure(A value) const

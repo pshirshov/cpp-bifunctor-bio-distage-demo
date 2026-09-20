@@ -20,7 +20,7 @@ add_executable(implicit_example examples/implicit_scope.cpp)
 target_link_libraries(implicit_example PRIVATE mini)
 
 enable_testing()
-foreach(name IN ITEMS bio_test io_test di_test stack_safety example_test syntax_test accessor_test implicit_test)
+foreach(name IN ITEMS bio_test io_test di_test stack_safety example_test syntax_test accessor_test implicit_test do_test do_stack_safety)
     add_executable(${name} tests/${name}.cpp)
     target_link_libraries(${name} PRIVATE mini)
     add_test(NAME ${name} COMMAND ${name})
